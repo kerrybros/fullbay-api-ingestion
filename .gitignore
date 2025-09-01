@@ -1,0 +1,26 @@
+# Temporary scripts and data files
+*.csv
+*.json
+*.pdf
+*.log
+logs/
+__pycache__/
+*.pyc
+
+# Lambda build directories
+lambda-build/
+lambda-deploy-fixed/
+
+# Environment files
+.env
+.env.local
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
