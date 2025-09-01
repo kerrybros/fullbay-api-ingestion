@@ -1,0 +1,30 @@
+# Development Environment Configuration
+# Used for local development and testing
+
+environment: development
+
+api:
+  base_url: "https://api.fullbay.com"
+  version: "v1"
+  timeout: 30
+  max_retries: 3
+
+database:
+  port: 5432
+  name: "fullbay_data"
+  connection_pool_size: 2
+  connection_timeout: 30
+
+scheduling:
+  expression: "rate(5 minutes)"  # More frequent for development
+  
+logging:
+  level: "DEBUG"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+features:
+  enable_metrics: true
+  enable_detailed_logging: true
+  
+aws:
+  region: "us-east-1"

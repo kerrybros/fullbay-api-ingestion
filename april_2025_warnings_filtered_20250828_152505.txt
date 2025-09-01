@@ -1,0 +1,21 @@
+APRIL 2025 INGESTION WARNINGS SUMMARY (FILTERED)
+================================================================================
+
+Note: False warnings for missing VIN/make/model and zero/negative totals
+have been removed from the validation logic as these are not actual issues.
+
+OTHER WARNINGS (2):
+------------------------------------------------------------
+Line 4: 2025-08-28 14:06:43,115
+2025-08-28 14:06:43,115 - april_2025_ingestion - WARNING - WARNING: This should appear
+
+Line 5: 2025-08-28 14:06:43,116
+2025-08-28 14:06:43,116 - april_2025_ingestion - ERROR - ERROR: This should appear
+
+================================================================================
+SUMMARY:
+  Total warnings/errors: 2
+  Data quality warnings: 0
+  Database warnings: 0
+  API warnings: 0
+  Other warnings: 2

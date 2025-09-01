@@ -1,0 +1,30 @@
+# Production Environment Configuration
+# Used for production deployment
+
+environment: production
+
+api:
+  base_url: "https://api.fullbay.com"
+  version: "v1"
+  timeout: 30
+  max_retries: 3
+
+database:
+  port: 5432
+  name: "fullbay_data"
+  connection_pool_size: 5
+  connection_timeout: 30
+
+scheduling:
+  expression: "rate(1 day)"  # Daily at midnight UTC
+  
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(levelname)s - %(message)s"
+
+features:
+  enable_metrics: true
+  enable_detailed_logging: false
+  
+aws:
+  region: "us-east-1"
