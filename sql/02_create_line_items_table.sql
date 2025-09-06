@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS fullbay_line_items (
     
     -- === SERVICE ORDER INFO (Repeated on each row) ===
     fullbay_service_order_id VARCHAR(50),
-    repair_order_number VARCHAR(50),
+    so_number VARCHAR(50), -- Service Order number (repairOrderNumber from API)
     service_order_created TIMESTAMP WITH TIME ZONE,
     service_order_start_date TIMESTAMP WITH TIME ZONE,
     service_order_completion_date TIMESTAMP WITH TIME ZONE,
@@ -106,8 +106,9 @@ CREATE TABLE IF NOT EXISTS fullbay_line_items (
     returned_quantity DECIMAL(10,3),
     
     -- === HOURS (for labor items) ===
-    labor_hours DECIMAL(8,2),
-    actual_hours DECIMAL(8,2),
+    so_hours DECIMAL(8,4), -- Original individual tech hours from API
+    labor_hours DECIMAL(8,4), -- Proportionally split total labor hours
+    actual_hours DECIMAL(8,4), -- Alias for labor_hours (for compatibility)
     
     -- === FINANCIAL DETAILS (Per Line Item) ===
     unit_cost DECIMAL(10,2),
@@ -167,7 +168,7 @@ CREATE TABLE IF NOT EXISTS fullbay_line_items (
 CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_invoice_id ON fullbay_line_items(fullbay_invoice_id);
 CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_invoice_date ON fullbay_line_items(invoice_date);
 CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_customer_id ON fullbay_line_items(customer_id);
-CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_repair_order ON fullbay_line_items(repair_order_number);
+CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_so_number ON fullbay_line_items(so_number);
 CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_unit_vin ON fullbay_line_items(unit_vin);
 CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_line_type ON fullbay_line_items(line_item_type);
 CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_part_number ON fullbay_line_items(shop_part_number);

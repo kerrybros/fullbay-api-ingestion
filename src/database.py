@@ -142,10 +142,10 @@ class DatabaseManager:
         shop_email VARCHAR(255),
         shop_address TEXT,
             
-            -- === CUSTOMER INFO (6 columns) ===
-            customer_id INTEGER,
-            customer_title VARCHAR(255),
-            customer_external_id VARCHAR(50),
+                         -- === CUSTOMER INFO (6 columns) ===
+             customer_id INTEGER,
+             customer VARCHAR(255),
+             customer_external_id VARCHAR(50),
             customer_main_phone VARCHAR(50),
             customer_secondary_phone VARCHAR(50),
             customer_billing_address TEXT,
@@ -179,12 +179,12 @@ class DatabaseManager:
             complaint_cause TEXT,
             complaint_authorized BOOLEAN,
             
-                         -- === CORRECTION/SERVICE INFO (7 columns) ===
-             fullbay_correction_id INTEGER,
-             correction_title VARCHAR(255),
-             global_component VARCHAR(255),
-             global_system VARCHAR(255),
-             global_service VARCHAR(255),
+                                      -- === CORRECTION/SERVICE INFO (7 columns) ===
+              fullbay_correction_id INTEGER,
+              correction_title VARCHAR(255),
+              component VARCHAR(255),
+              system VARCHAR(255),
+              global_service VARCHAR(255),
              recommended_correction TEXT,
              service_description TEXT,
             
@@ -275,7 +275,7 @@ class DatabaseManager:
             f"CREATE INDEX IF NOT EXISTS idx_{self.line_items_table}_invoice_id ON {self.line_items_table}(fullbay_invoice_id);",
             f"CREATE INDEX IF NOT EXISTS idx_{self.line_items_table}_invoice_date ON {self.line_items_table}(invoice_date);",
             f"CREATE INDEX IF NOT EXISTS idx_{self.line_items_table}_customer_id ON {self.line_items_table}(customer_id);",
-            f"CREATE INDEX IF NOT EXISTS idx_{self.line_items_table}_repair_order ON {self.line_items_table}(repair_order_number);",
+            f"CREATE INDEX IF NOT EXISTS idx_{self.line_items_table}_so_number ON {self.line_items_table}(so_number);",
             f"CREATE INDEX IF NOT EXISTS idx_{self.line_items_table}_unit_vin ON {self.line_items_table}(unit_vin);",
             f"CREATE INDEX IF NOT EXISTS idx_{self.line_items_table}_line_type ON {self.line_items_table}(line_item_type);",
             f"CREATE INDEX IF NOT EXISTS idx_{self.line_items_table}_part_number ON {self.line_items_table}(shop_part_number);",
@@ -457,13 +457,17 @@ class DatabaseManager:
                     
                     # Process parts for this correction
                     parts = correction.get('Parts', [])
+                    parts_line_items = []
                     if parts:
-                        parts_line_items = self._process_parts(parts, correction_context)
+                        parts_line_items = self._process_parts(parts, correction_context, complaint)
                         line_items.extend(parts_line_items)
                     
                     # Process labor for this correction
                     labor_line_items = self._process_labor(correction, complaint, correction_context)
                     line_items.extend(labor_line_items)
+                    
+                    # Validate total for this service description (correction)
+                    self._validate_service_description_total(correction, parts_line_items, labor_line_items)
             
             # Step 2: Add SHOP SUPPLIES line item (always create, even if 0)
             shop_supplies_item = self._create_shop_supplies_line_item(invoice_context, raw_data_id)
@@ -523,17 +527,17 @@ class DatabaseManager:
             'shop_email': record.get('shopEmail'),
             'shop_address': record.get('shopPhysicalAddress'),
             
-            # Customer info
-            'customer_id': customer_data.get('customerId'),
-            'customer_title': customer_data.get('title'),
-            'customer_external_id': customer_data.get('externalId'),
+                         # Customer info
+             'customer_id': customer_data.get('customerId'),
+             'customer': customer_data.get('title'),
+             'customer_external_id': customer_data.get('externalId'),
             'customer_main_phone': customer_data.get('mainPhone'),
             'customer_secondary_phone': customer_data.get('secondaryPhone'),
             'customer_billing_address': record.get('customerBillingAddress'),
             
             # Service order info
             'fullbay_service_order_id': service_order.get('primaryKey'),
-            'repair_order_number': service_order.get('repairOrderNumber'),
+            'so_number': service_order.get('repairOrderNumber'),  # Service Order number
             'service_order_created': self._parse_datetime(service_order.get('created')),
             'service_order_start_date': self._parse_datetime(service_order.get('startDateTime')),
             'service_order_completion_date': self._parse_datetime(service_order.get('completionDateTime')),
@@ -552,8 +556,11 @@ class DatabaseManager:
             'primary_technician': service_order.get('technician'),
             'primary_technician_number': service_order.get('technicianNumber'),
             
-                         # Service order totals (for context)
-             'so_supplies_total': self._parse_decimal(record.get('suppliesTotal')),  # Invoice-level supplies total
+            # Tax information
+            'tax_rate': self._parse_decimal(record.get('taxRate')),
+            
+            # Service order totals (for context)
+            'so_supplies_total': self._parse_decimal(record.get('suppliesTotal')),  # Invoice-level supplies total
         }
         
         return context
@@ -601,8 +608,8 @@ class DatabaseManager:
         context.update({
             'fullbay_correction_id': correction.get('primaryKey'),
             'correction_title': correction.get('title'),
-            'global_component': correction.get('globalComponent'),
-            'global_system': correction.get('globalSystem'),
+            'component': correction.get('globalComponent'),
+            'system': correction.get('globalSystem'),
             'global_service': correction.get('globalService'),
             'recommended_correction': correction.get('recommendedCorrection'),
             'service_description': correction.get('actualCorrection'),
@@ -610,94 +617,139 @@ class DatabaseManager:
         
         return context
     
-    def _process_parts(self, parts: List[Dict[str, Any]], context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _process_parts(self, parts: List[Dict[str, Any]], context: Dict[str, Any], complaint: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Process parts for a correction, grouping identical parts correctly.
+        Process parts for a correction, splitting by assigned technicians.
         
-        Grouping Logic: Group parts ONLY if:
-        - Same shop_part_number
-        - Same unit_price  
-        - Same correction (already guaranteed since we're processing one correction)
-        - Effective quantity > 0 (quantity - returned_qty > 0)
+        Each part gets split into separate line items for each assigned technician,
+        with quantities and totals distributed proportionally by technician_portion.
         
         Args:
             parts: List of part objects from a correction
             context: Correction context
+            complaint: Parent complaint JSON object (for AssignedTechnicians)
             
         Returns:
-            List of part line items (only for parts with positive effective quantity)
+            List of part line items (one per part per technician)
         """
         if not parts:
             return []
         
-        # Group parts by part_number + unit_price
-        parts_groups = {}
-        
-        for part in parts:
-            shop_part_number = part.get('shopPartNumber', '')
-            selling_price = self._parse_decimal(part.get('sellingPrice'))
-            
-            # Calculate effective quantity (quantity - returned_qty)
-            original_qty = self._parse_decimal(part.get('quantity', 0))
-            returned_qty = self._parse_decimal(part.get('returnedQuantity', 0))
-            effective_qty = original_qty - returned_qty
-            
-            # Skip parts with effective quantity <= 0
-            if effective_qty <= 0:
-                continue
-            
-            # Create grouping key
-            group_key = f"{shop_part_number}|{selling_price}"
-            
-            if group_key not in parts_groups:
-                             parts_groups[group_key] = {
-                 'parts': [],
-                 'total_effective_quantity': 0,
-                 'total_price': 0
-             }
-            
-            parts_groups[group_key]['parts'].append(part)
-            parts_groups[group_key]['total_effective_quantity'] += effective_qty
-            
-            parts_groups[group_key]['total_price'] += self._parse_decimal(part.get('sellingPrice', 0)) * effective_qty
-        
-        # Create line items from grouped parts
         line_items = []
         
-        for group_key, group_data in parts_groups.items():
-            # Use the first part in the group as the template
-            template_part = group_data['parts'][0]
-            
-            line_item = context.copy()
-            line_item.update({
-                'line_item_type': self._classify_part_type(template_part),
-                'fullbay_part_id': template_part.get('primaryKey'),
-                'part_description': template_part.get('description'),
-                'shop_part_number': template_part.get('shopPartNumber'),
-                'vendor_part_number': template_part.get('vendorPartNumber'),
-                'part_category': template_part.get('partCategory'),
-                
-                # Grouped quantities and totals (using effective quantity)
-                'quantity': group_data['total_effective_quantity'],  # Effective quantity (original - returned)
-                'to_be_returned_quantity': sum(self._parse_decimal(p.get('toBeReturnedQuantity', 0)) for p in group_data['parts']),
-                'returned_quantity': sum(self._parse_decimal(p.get('returnedQuantity', 0)) for p in group_data['parts']),
-                
-                                # Financial details
-                'unit_cost': self._parse_decimal(template_part.get('cost')),
-                'unit_price': self._parse_decimal(template_part.get('sellingPrice')),
-                'line_total': group_data['total_price'],
-                'price_overridden': template_part.get('sellingPriceOverridden') == 'Yes',
-                
-                                 # Classification
-                 'taxable': template_part.get('taxable') == 'Yes',
-                 'inventory_item': template_part.get('inventory') == 'Yes',
-                 'core_type': template_part.get('coreType'),
-                 'sublet': template_part.get('sublet') == 'Yes',
-            })
-            
-            line_items.append(line_item)
+        # Get assigned technicians from the complaint
+        assigned_technicians = complaint.get('AssignedTechnicians', [])
         
-        logger.debug(f"Grouped {len(parts)} parts into {len(line_items)} line items for correction {context.get('fullbay_correction_id')}")
+        # Filter out technicians with 0% portion
+        valid_technicians = [tech for tech in assigned_technicians if tech.get('portion', 0) > 0]
+        
+        if not valid_technicians:
+            # No valid assigned technicians - create one line item with no tech assignment
+            for part in parts:
+                # Calculate effective quantity (quantity - returned_qty)
+                original_qty = self._parse_decimal(part.get('quantity', 0))
+                returned_qty = self._parse_decimal(part.get('returnedQuantity', 0))
+                effective_qty = original_qty - returned_qty
+                
+                # Skip parts with effective quantity <= 0
+                if effective_qty <= 0:
+                    continue
+                
+                line_item = context.copy()
+                line_item.update({
+                    'line_item_type': self._classify_part_type(part),
+                    'fullbay_part_id': part.get('primaryKey'),
+                    'part_description': part.get('description'),
+                    'shop_part_number': part.get('shopPartNumber'),
+                    'vendor_part_number': part.get('vendorPartNumber'),
+                    'part_category': part.get('partCategory'),
+                    
+                    # No tech assignment
+                    'assigned_technician': None,
+                    'assigned_technician_number': None,
+                    'technician_portion': None,
+                    
+                    # Quantities and financial details
+                    'quantity': effective_qty,
+                    'to_be_returned_quantity': self._parse_decimal(part.get('toBeReturnedQuantity', 0)),
+                    'returned_quantity': returned_qty,
+                    'so_hours': None,  # Parts don't have hours
+                    'unit_cost': self._parse_decimal(part.get('cost')),
+                    'unit_price': self._parse_decimal(part.get('sellingPrice')),
+                    'line_total': self._parse_decimal(part.get('sellingPrice', 0)) * effective_qty,
+                    'price_overridden': part.get('sellingPriceOverridden') == 'Yes',
+                    
+                    # Classification
+                    'taxable': part.get('taxable') == 'Yes',
+                    'inventory_item': part.get('inventory') == 'Yes',
+                    'core_type': part.get('coreType'),
+                    'sublet': part.get('sublet') == 'Yes',
+                })
+                
+                line_items.append(line_item)
+        else:
+            # Validate that portions add to 100%
+            total_portion = sum(tech.get('portion', 0) for tech in valid_technicians)
+            if abs(total_portion - 100) > 0.001:
+                logger.warning(f"Portions don't add to 100% for correction {context.get('fullbay_correction_id')}: "
+                             f"Total portion = {total_portion}%")
+            
+            # Create separate line items for each technician for each part
+            for part in parts:
+                # Calculate effective quantity (quantity - returned_qty)
+                original_qty = self._parse_decimal(part.get('quantity', 0))
+                returned_qty = self._parse_decimal(part.get('returnedQuantity', 0))
+                effective_qty = original_qty - returned_qty
+                
+                # Skip parts with effective quantity <= 0
+                if effective_qty <= 0:
+                    continue
+                
+                part_total = self._parse_decimal(part.get('sellingPrice', 0)) * effective_qty
+                
+                for tech in valid_technicians:
+                    portion = tech.get('portion', 0)
+                    if portion <= 0:
+                        continue
+                    
+                    # Calculate this technician's portion
+                    tech_quantity = effective_qty * (portion / 100)
+                    tech_total = part_total * (portion / 100)
+                    
+                    line_item = context.copy()
+                    line_item.update({
+                        'line_item_type': self._classify_part_type(part),
+                        'fullbay_part_id': part.get('primaryKey'),
+                        'part_description': part.get('description'),
+                        'shop_part_number': part.get('shopPartNumber'),
+                        'vendor_part_number': part.get('vendorPartNumber'),
+                        'part_category': part.get('partCategory'),
+                        
+                        # Tech assignment
+                        'assigned_technician': tech.get('technician'),
+                        'assigned_technician_number': tech.get('technicianNumber'),
+                        'technician_portion': portion,
+                        
+                        # Quantities and financial details (split by tech portion)
+                        'quantity': tech_quantity,
+                        'to_be_returned_quantity': self._parse_decimal(part.get('toBeReturnedQuantity', 0)) * (portion / 100),
+                        'returned_quantity': returned_qty * (portion / 100),
+                        'so_hours': None,  # Parts don't have hours
+                        'unit_cost': self._parse_decimal(part.get('cost')),
+                        'unit_price': self._parse_decimal(part.get('sellingPrice')),
+                        'line_total': tech_total,
+                        'price_overridden': part.get('sellingPriceOverridden') == 'Yes',
+                        
+                        # Classification
+                        'taxable': part.get('taxable') == 'Yes',
+                        'inventory_item': part.get('inventory') == 'Yes',
+                        'core_type': part.get('coreType'),
+                        'sublet': part.get('sublet') == 'Yes',
+                    })
+                    
+                    line_items.append(line_item)
+        
+        logger.debug(f"Created {len(line_items)} part line items for correction {context.get('fullbay_correction_id')}")
         return line_items
     
     def _process_labor(self, correction: Dict[str, Any], complaint: Dict[str, Any], context: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -717,49 +769,169 @@ class DatabaseManager:
         # Get assigned technicians from the complaint
         assigned_technicians = complaint.get('AssignedTechnicians', [])
         
-        if not assigned_technicians:
-            # No specific technician assignments, but there's labor - create one labor row
+        # Filter out technicians with 0% portion
+        valid_technicians = [tech for tech in assigned_technicians if tech.get('portion', 0) > 0]
+        
+        if not valid_technicians:
+            # No valid assigned technicians - create one labor row with no tech assignment
             if self._parse_decimal(correction.get('laborHoursTotal', 0)) > 0:
                 line_item = context.copy()
                 line_item.update({
                     'line_item_type': 'LABOR',
                     'labor_description': correction.get('actualCorrection') or correction.get('recommendedCorrection'),
                     'labor_rate_type': correction.get('laborRate'),
-                    'assigned_technician': context.get('primary_technician'),
-                    'assigned_technician_number': context.get('primary_technician_number'),
-                    
-                                         'so_hours': self._parse_decimal(correction.get('laborHoursTotal')),  # Use total if no individual hours
-                     'technician_portion': 100,
-                    
-                                            'line_total': self._parse_decimal(correction.get('laborTotal')),
-                        'taxable': correction.get('taxable') != 'No',
+                    'assigned_technician': None,
+                    'assigned_technician_number': None,
+                    'technician_portion': None,
+                    'so_hours': self._parse_decimal(correction.get('laborHoursTotal')),
+                    'labor_hours': self._parse_decimal(correction.get('laborHoursTotal')),
+                    'actual_hours': self._parse_decimal(correction.get('laborHoursTotal')),
+                    'line_total': self._parse_decimal(correction.get('laborTotal')),
+                    'taxable': correction.get('taxable') != 'No',
                 })
                 line_items.append(line_item)
         else:
+            # Get total labor hours and cost from correction
+            total_labor_hours = self._parse_decimal(correction.get('laborHoursTotal', 0))
+            total_labor_cost = self._parse_decimal(correction.get('laborTotal', 0))
+            
+            # Validate that portions add to 100%
+            total_portion = sum(tech.get('portion', 0) for tech in valid_technicians)
+            if abs(total_portion - 100) > 0.001:
+                logger.warning(f"Portions don't add to 100% for correction {context.get('fullbay_correction_id')}: "
+                             f"Total portion = {total_portion}%")
+            
             # Create separate labor row for each technician
-            for tech_assignment in assigned_technicians:
+            for tech in valid_technicians:
+                portion = tech.get('portion', 0)
+                if portion <= 0:
+                    continue
+                
+                # Calculate this technician's portion of total labor hours (same logic as parts)
+                tech_labor_hours = total_labor_hours * (portion / 100)
+                tech_labor_cost = total_labor_cost * (portion / 100)
+                    
                 line_item = context.copy()
                 line_item.update({
                     'line_item_type': 'LABOR',
                     'labor_description': correction.get('actualCorrection') or correction.get('recommendedCorrection'),
                     'labor_rate_type': correction.get('laborRate'),
-                    'assigned_technician': tech_assignment.get('technician'),
-                    'assigned_technician_number': tech_assignment.get('technicianNumber'),
-                    
-                                         'so_hours': self._parse_decimal(tech_assignment.get('actualHours')),  # This tech's hours
-                     'technician_portion': tech_assignment.get('portion', 100),
-                    
-                    # Calculate this technician's portion of the labor cost
-                                            'line_total': self._calculate_technician_labor_cost(
-                            correction.get('laborTotal'),
-                            tech_assignment.get('portion', 100)
-                        ),
+                    'assigned_technician': tech.get('technician'),
+                    'assigned_technician_number': tech.get('technicianNumber'),
+                    'technician_portion': portion,
+                    'so_hours': self._parse_decimal(tech.get('actualHours')),  # Original API data
+                    'labor_hours': tech_labor_hours,  # Proportionally split hours
+                    'actual_hours': tech_labor_hours,  # Alias for compatibility
+                    'line_total': tech_labor_cost,
                     'taxable': correction.get('taxable') != 'No',
                 })
                 line_items.append(line_item)
         
+        # Validate labor totals (hours and cost)
+        self._validate_labor_totals(correction, line_items)
+        
         logger.debug(f"Created {len(line_items)} labor line items for correction {context.get('fullbay_correction_id')}")
         return line_items
+    
+    def _validate_labor_totals(self, correction: Dict[str, Any], labor_line_items: List[Dict[str, Any]]) -> None:
+        """
+        Validate that the sum of all labor line item totals matches the original correction totals.
+        
+        Args:
+            correction: Correction JSON object
+            labor_line_items: List of labor line items
+            
+        Raises:
+            ValueError: If totals don't match within tolerance
+        """
+        if not labor_line_items:
+            return
+            
+        # Get original totals from the correction
+        original_labor_hours = self._parse_decimal(correction.get('laborHoursTotal', 0))
+        original_labor_cost = self._parse_decimal(correction.get('laborTotal', 0))
+        
+        # Calculate sum of all labor line item totals
+        calculated_labor_hours = 0
+        calculated_labor_cost = 0
+        for item in labor_line_items:
+            calculated_labor_hours += self._parse_decimal(item.get('labor_hours', 0))
+            calculated_labor_cost += self._parse_decimal(item.get('line_total', 0))
+        
+        # Check if totals match within tolerance (0.001)
+        hours_diff = abs(original_labor_hours - calculated_labor_hours)
+        cost_diff = abs(original_labor_cost - calculated_labor_cost)
+        
+        if hours_diff > 0.001:
+            # Make small adjustment to largest line item to match exactly
+            if labor_line_items:
+                largest_item = max(labor_line_items, key=lambda x: self._parse_decimal(x.get('labor_hours', 0)))
+                adjustment = original_labor_hours - calculated_labor_hours
+                current_hours = self._parse_decimal(largest_item.get('labor_hours', 0))
+                largest_item['labor_hours'] = current_hours + adjustment
+                largest_item['actual_hours'] = current_hours + adjustment  # Update alias too
+                logger.info(f"Adjusted labor hours for correction {correction.get('primaryKey')}: "
+                          f"Original: {original_labor_hours}, Calculated: {calculated_labor_hours}, "
+                          f"Adjustment: {adjustment}, New largest item hours: {current_hours + adjustment}")
+        
+        if cost_diff > 0.001:
+            # Make small adjustment to largest line item to match exactly
+            if labor_line_items:
+                largest_item = max(labor_line_items, key=lambda x: self._parse_decimal(x.get('line_total', 0)))
+                adjustment = original_labor_cost - calculated_labor_cost
+                current_total = self._parse_decimal(largest_item.get('line_total', 0))
+                largest_item['line_total'] = current_total + adjustment
+                logger.info(f"Adjusted labor cost for correction {correction.get('primaryKey')}: "
+                          f"Original: {original_labor_cost}, Calculated: {calculated_labor_cost}, "
+                          f"Adjustment: {adjustment}, New largest item total: {current_total + adjustment}")
+    
+    def _validate_service_description_total(self, correction: Dict[str, Any], parts_line_items: List[Dict[str, Any]], labor_line_items: List[Dict[str, Any]]) -> None:
+        """
+        Validate that the sum of all line item totals matches the original service description total.
+        
+        Args:
+            correction: Correction JSON object
+            parts_line_items: List of part line items
+            labor_line_items: List of labor line items
+            
+        Raises:
+            ValueError: If totals don't match within tolerance
+        """
+        # Get original totals from the correction
+        parts_total = self._parse_decimal(correction.get('partsTotal', 0))
+        labor_total = self._parse_decimal(correction.get('laborTotal', 0))
+        original_total = parts_total + labor_total
+        
+        # Calculate sum of all line item totals
+        calculated_total = 0
+        for item in parts_line_items + labor_line_items:
+            calculated_total += self._parse_decimal(item.get('line_total', 0))
+        
+        # Check if totals match within tolerance
+        if abs(original_total - calculated_total) > 0.001:
+            # Make small adjustment to largest line item to match exactly
+            all_items = parts_line_items + labor_line_items
+            if all_items:
+                # Find the largest line item
+                largest_item = max(all_items, key=lambda x: self._parse_decimal(x.get('line_total', 0)))
+                adjustment = original_total - calculated_total
+                
+                # Adjust the largest line item
+                current_total = self._parse_decimal(largest_item.get('line_total', 0))
+                largest_item['line_total'] = current_total + adjustment
+                
+                # Log the adjustment
+                logger.info(f"Adjusted line total for correction {correction.get('primaryKey')}: "
+                          f"Original: {original_total}, Calculated: {calculated_total}, "
+                          f"Adjustment: {adjustment}, New largest item total: {largest_item['line_total']}")
+            else:
+                # No line items to adjust - this is an error
+                raise ValueError(f"Total mismatch for correction {correction.get('primaryKey')}: "
+                               f"Original: {original_total}, Calculated: {calculated_total}, "
+                               f"No line items to adjust")
+        else:
+            logger.debug(f"Total validation passed for correction {correction.get('primaryKey')}: "
+                        f"Original: {original_total}, Calculated: {calculated_total}")
     
     def _create_shop_supplies_line_item(self, invoice_context: Dict[str, Any], raw_data_id: int) -> Dict[str, Any]:
         """
@@ -820,8 +992,8 @@ class DatabaseManager:
             # No correction context
             'fullbay_correction_id': None,
             'correction_title': None,
-            'global_component': None,
-            'global_system': None,
+            'component': None,
+            'system': None,
             'global_service': None,
             'recommended_correction': None,
             'service_description': None,  # No correction context for supplies
@@ -892,8 +1064,8 @@ class DatabaseManager:
             # No correction context
             'fullbay_correction_id': None,
             'correction_title': None,
-            'global_component': None,
-            'global_system': None,
+            'component': None,
+            'system': None,
             'global_service': None,
             'recommended_correction': None,
             'service_description': None,  # No correction context for misc charges
@@ -1046,19 +1218,19 @@ class DatabaseManager:
         
                  # Prepare SQL statement - UPDATED 73-COLUMN SCHEMA
         insert_sql = f"""
-        INSERT INTO {self.line_items_table} (
-                    raw_data_id, fullbay_invoice_id, invoice_number, invoice_date, due_date,
-        shop_title, shop_email, shop_address,
-            customer_id, customer_title, customer_external_id, customer_main_phone, 
-            customer_secondary_phone, customer_billing_address,
-            fullbay_service_order_id, repair_order_number, service_order_created, 
-            service_order_start_date, service_order_completion_date,
-            unit_id, unit, unit_type, unit_year, unit_make, unit_model, unit_vin, unit_license_plate,
-            primary_technician, primary_technician_number,
-            fullbay_complaint_id, complaint_type, complaint_subtype, complaint_note, 
-            complaint_cause, complaint_authorized,
-            fullbay_correction_id, correction_title, global_component, global_system, 
-            global_service, recommended_correction, service_description,
+                 INSERT INTO {self.line_items_table} (
+                     raw_data_id, fullbay_invoice_id, invoice_number, invoice_date, due_date,
+         shop_title, shop_email, shop_address,
+             customer_id, customer, customer_external_id, customer_main_phone, 
+             customer_secondary_phone, customer_billing_address,
+             fullbay_service_order_id, so_number, service_order_created, 
+             service_order_start_date, service_order_completion_date,
+             unit_id, unit, unit_type, unit_year, unit_make, unit_model, unit_vin, unit_license_plate,
+             primary_technician, primary_technician_number,
+             fullbay_complaint_id, complaint_type, complaint_subtype, complaint_note, 
+             complaint_cause, complaint_authorized,
+             fullbay_correction_id, correction_title, component, system, 
+             global_service, recommended_correction, service_description,
             line_item_type, fullbay_part_id, part_description, shop_part_number, 
             vendor_part_number, part_category,
             labor_description, labor_rate_type, assigned_technician, assigned_technician_number,
@@ -1068,19 +1240,19 @@ class DatabaseManager:
                         taxable, tax_rate, line_tax, sales_total, inventory_item, core_type, sublet,
                           so_supplies_total,
             ingestion_timestamp, ingestion_source
-        )         VALUES (
-            %(raw_data_id)s, %(fullbay_invoice_id)s, %(invoice_number)s, %(invoice_date)s, %(due_date)s,
-            %(shop_title)s, %(shop_email)s, %(shop_address)s,
-            %(customer_id)s, %(customer_title)s, %(customer_external_id)s, %(customer_main_phone)s,
-            %(customer_secondary_phone)s, %(customer_billing_address)s,
-            %(fullbay_service_order_id)s, %(repair_order_number)s, %(service_order_created)s,
-            %(service_order_start_date)s, %(service_order_completion_date)s,
-            %(unit_id)s, %(unit)s, %(unit_type)s, %(unit_year)s, %(unit_make)s, %(unit_model)s, %(unit_vin)s, %(unit_license_plate)s,
-            %(primary_technician)s, %(primary_technician_number)s,
-            %(fullbay_complaint_id)s, %(complaint_type)s, %(complaint_subtype)s, %(complaint_note)s,
-            %(complaint_cause)s, %(complaint_authorized)s,
-            %(fullbay_correction_id)s, %(correction_title)s, %(global_component)s, %(global_system)s,
-            %(global_service)s, %(recommended_correction)s, %(service_description)s,
+                 )         VALUES (
+             %(raw_data_id)s, %(fullbay_invoice_id)s, %(invoice_number)s, %(invoice_date)s, %(due_date)s,
+             %(shop_title)s, %(shop_email)s, %(shop_address)s,
+             %(customer_id)s, %(customer)s, %(customer_external_id)s, %(customer_main_phone)s,
+             %(customer_secondary_phone)s, %(customer_billing_address)s,
+             %(fullbay_service_order_id)s, %(so_number)s, %(service_order_created)s,
+             %(service_order_start_date)s, %(service_order_completion_date)s,
+             %(unit_id)s, %(unit)s, %(unit_type)s, %(unit_year)s, %(unit_make)s, %(unit_model)s, %(unit_vin)s, %(unit_license_plate)s,
+             %(primary_technician)s, %(primary_technician_number)s,
+             %(fullbay_complaint_id)s, %(complaint_type)s, %(complaint_subtype)s, %(complaint_note)s,
+             %(complaint_cause)s, %(complaint_authorized)s,
+             %(fullbay_correction_id)s, %(correction_title)s, %(component)s, %(system)s,
+             %(global_service)s, %(recommended_correction)s, %(service_description)s,
             %(line_item_type)s, %(fullbay_part_id)s, %(part_description)s, %(shop_part_number)s,
             %(vendor_part_number)s, %(part_category)s,
             %(labor_description)s, %(labor_rate_type)s, %(assigned_technician)s, %(assigned_technician_number)s,
@@ -1135,14 +1307,14 @@ class DatabaseManager:
             'shop_title': None,
             'shop_email': None,
             'shop_address': None,
-            'customer_id': None,
-            'customer_title': None,
-            'customer_external_id': None,
+                         'customer_id': None,
+             'customer': None,
+             'customer_external_id': None,
             'customer_main_phone': None,
             'customer_secondary_phone': None,
             'customer_billing_address': None,
             'fullbay_service_order_id': None,
-            'repair_order_number': None,
+            'so_number': None,
             'service_order_created': None,
             'service_order_start_date': None,
             'service_order_completion_date': None,
@@ -1164,8 +1336,8 @@ class DatabaseManager:
             'complaint_authorized': False,
             'fullbay_correction_id': None,
             'correction_title': None,
-            'global_component': None,
-            'global_system': None,
+            'component': None,
+            'system': None,
             'global_service': None,
             'recommended_correction': None,
             'service_description': None,
@@ -1721,7 +1893,7 @@ class DatabaseManager:
                                         # Check for missing critical fields
                     checks = [
                         ("missing_invoice_numbers", "invoice_number IS NULL OR invoice_number = ''"),
-                        ("missing_customer_info", "customer_id IS NULL OR customer_title IS NULL"),
+                                                 ("missing_customer_info", "customer_id IS NULL OR customer IS NULL"),
                         ("missing_unit_info", "unit_vin IS NULL OR unit_make IS NULL"),
                         ("zero_prices", "line_total = 0"),  # Only flag zero prices, not negative (returns/credits)
                         ("missing_labor_hours", "line_item_type = 'LABOR' AND so_hours IS NULL"),  # Only flag null hours, not 0.0

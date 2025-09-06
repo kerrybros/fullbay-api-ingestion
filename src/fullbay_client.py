@@ -152,7 +152,7 @@ class FullbayClient:
             logger.debug(f"Request parameters: {params}")
             
             start_time = time.time()
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, timeout=1000)
             response_time = time.time() - start_time
             
             logger.info(f"API response status: {response.status_code}")
