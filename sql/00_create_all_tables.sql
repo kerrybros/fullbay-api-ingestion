@@ -32,7 +32,7 @@ CREATE INDEX IF NOT EXISTS idx_fullbay_raw_data_json_gin ON fullbay_raw_data USI
 -- =====================================================
 -- 2. Line Items Table
 -- =====================================================
--- Stores flattened line items from Fullbay invoices
+-- Stores flattened line items from Fullbay invoices - ORIGINAL 72-COLUMN SCHEMA
 
 CREATE TABLE IF NOT EXISTS fullbay_line_items (
     id SERIAL PRIMARY KEY,
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS fullbay_line_items (
     
     -- === SERVICE ORDER INFO (Repeated on each row) ===
     fullbay_service_order_id VARCHAR(50),
-    repair_order_number VARCHAR(50),
+    so_number VARCHAR(50),
     service_order_created TIMESTAMP WITH TIME ZONE,
     service_order_start_date TIMESTAMP WITH TIME ZONE,
     service_order_completion_date TIMESTAMP WITH TIME ZONE,
@@ -127,7 +127,6 @@ CREATE TABLE IF NOT EXISTS fullbay_line_items (
     labor_rate_type VARCHAR(50),
     assigned_technician VARCHAR(255),
     assigned_technician_number VARCHAR(50),
-    assigned_technician_actual_hours DECIMAL(8,4),
     assigned_technician_portion INTEGER, -- Percentage of work for this technician
     
     -- === QUANTITIES ===
@@ -136,68 +135,36 @@ CREATE TABLE IF NOT EXISTS fullbay_line_items (
     returned_quantity DECIMAL(10,3),
     
     -- === HOURS (for labor items) ===
-    labor_hours DECIMAL(8,2),
-    actual_hours DECIMAL(8,2),
+    so_hours DECIMAL(8,2),
+    labor_hours DECIMAL(8,2), -- Proportionally split total labor hours
     
     -- === FINANCIAL DETAILS (Per Line Item) ===
     unit_cost DECIMAL(10,2),
     unit_price DECIMAL(10,2),
-    line_total_cost DECIMAL(10,2),
-    line_total_price DECIMAL(10,2),
+    line_total DECIMAL(10,2),
     price_overridden BOOLEAN DEFAULT FALSE,
     
     -- === TAX INFO ===
     taxable BOOLEAN DEFAULT TRUE,
     tax_rate DECIMAL(5,2),
-    tax_amount DECIMAL(10,2),
+    line_tax DECIMAL(10,2),  -- Calculated tax amount for this line
+    sales_total DECIMAL(10,2),  -- Line total + line tax
     
     -- === CLASSIFICATION ===
     inventory_item BOOLEAN DEFAULT FALSE,
     core_type VARCHAR(50),
     sublet BOOLEAN DEFAULT FALSE,
     
-    -- === QUICKBOOKS INTEGRATION ===
-    quickbooks_account VARCHAR(255),
-    quickbooks_item VARCHAR(255),
-    quickbooks_item_type VARCHAR(100),
-    quickbooks_id VARCHAR(50),
-    
-    -- === INVOICE TOTALS (Repeated on each row for context) ===
-    invoice_misc_charge_total DECIMAL(10,2),
-    invoice_service_call_total DECIMAL(10,2),
-    invoice_mileage_total DECIMAL(10,2),
-    invoice_mileage_cost_total DECIMAL(10,2),
-    invoice_parts_total DECIMAL(10,2),
-    invoice_labor_hours_total DECIMAL(8,2),
-    invoice_labor_total DECIMAL(10,2),
-    invoice_sublet_labor_total DECIMAL(10,2),
-    invoice_supplies_total DECIMAL(10,2),
-    invoice_subtotal DECIMAL(10,2),
-    invoice_tax_total DECIMAL(10,2),
-    invoice_total DECIMAL(10,2),
-    invoice_balance DECIMAL(10,2),
-    
-    -- === SERVICE ORDER TOTALS (Repeated on each row for context) ===
-    so_total_parts_cost DECIMAL(10,2),
-    so_total_parts_price DECIMAL(10,2),
-    so_total_labor_hours DECIMAL(8,2),
-    so_total_labor_cost DECIMAL(10,2),
-    so_subtotal DECIMAL(10,2),
-    so_tax_total DECIMAL(10,2),
-    so_total_amount DECIMAL(10,2),
-    
-    -- === METADATA ===
+    -- === METADATA (2 columns) ===
     ingestion_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    ingestion_source VARCHAR(100) DEFAULT 'fullbay_api',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    ingestion_source VARCHAR(100) DEFAULT 'fullbay_api'
 );
 
 -- Indexes for line items table
 CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_invoice_id ON fullbay_line_items(fullbay_invoice_id);
 CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_invoice_date ON fullbay_line_items(invoice_date);
 CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_customer_id ON fullbay_line_items(customer_id);
-CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_repair_order ON fullbay_line_items(repair_order_number);
+CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_so_number ON fullbay_line_items(so_number);
 CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_unit_vin ON fullbay_line_items(unit_vin);
 CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_line_type ON fullbay_line_items(line_item_type);
 CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_part_number ON fullbay_line_items(shop_part_number);

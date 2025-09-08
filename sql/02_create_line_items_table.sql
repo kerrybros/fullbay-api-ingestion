@@ -3,86 +3,69 @@
 -- =====================================================
 -- This table stores all line items (parts, labor, supplies, etc.) from Fullbay invoices
 -- in a flattened, queryable format for reporting and analysis
+-- ORIGINAL 72-COLUMN SCHEMA (restored from database.py + labor_hours - so_supplies_total)
 
 CREATE TABLE IF NOT EXISTS fullbay_line_items (
     id SERIAL PRIMARY KEY,
     raw_data_id INTEGER REFERENCES fullbay_raw_data(id) ON DELETE CASCADE,
     
-    -- === INVOICE LEVEL INFO (Repeated on each row) ===
+    -- === INVOICE LEVEL INFO (7 columns) ===
     fullbay_invoice_id VARCHAR(50) NOT NULL,
     invoice_number VARCHAR(50),
     invoice_date DATE,
     due_date DATE,
-    exported BOOLEAN DEFAULT FALSE,
-    
-    -- === SHOP INFO (Repeated on each row) ===
     shop_title VARCHAR(255),
     shop_email VARCHAR(255),
-    shop_physical_address TEXT,
+    shop_address TEXT,
     
-    -- === CUSTOMER INFO (Repeated on each row) ===
+    -- === CUSTOMER INFO (6 columns) ===
     customer_id INTEGER,
-    customer_title VARCHAR(255),
+    customer VARCHAR(255),
     customer_external_id VARCHAR(50),
-    customer_main_phone VARCHAR(20),
-    customer_secondary_phone VARCHAR(20),
-    customer_billing_employee VARCHAR(255),
-    customer_billing_email VARCHAR(255),
+    customer_main_phone VARCHAR(50),
+    customer_secondary_phone VARCHAR(50),
     customer_billing_address TEXT,
     
-    -- === SERVICE ORDER INFO (Repeated on each row) ===
+    -- === SERVICE ORDER INFO (5 columns) ===
     fullbay_service_order_id VARCHAR(50),
-    so_number VARCHAR(50), -- Service Order number (repairOrderNumber from API)
+    so_number VARCHAR(50),
     service_order_created TIMESTAMP WITH TIME ZONE,
     service_order_start_date TIMESTAMP WITH TIME ZONE,
     service_order_completion_date TIMESTAMP WITH TIME ZONE,
-    service_order_description TEXT,
     
-    -- === UNIT/VEHICLE INFO (Repeated on each row) ===
+    -- === UNIT/VEHICLE INFO (8 columns) ===
     unit_id VARCHAR(50),
-    unit_number VARCHAR(50),
-    unit_nickname VARCHAR(100),
+    unit VARCHAR(50),
     unit_type VARCHAR(100),
-    unit_subtype VARCHAR(100),
     unit_year VARCHAR(10),
     unit_make VARCHAR(100),
     unit_model VARCHAR(100),
     unit_vin VARCHAR(50),
     unit_license_plate VARCHAR(20),
     
-    -- === PRIMARY TECHNICIAN INFO (Repeated on each row) ===
+    -- === PRIMARY TECHNICIAN INFO (2 columns) ===
     primary_technician VARCHAR(255),
     primary_technician_number VARCHAR(50),
-    parts_manager VARCHAR(255),
-    parts_manager_number VARCHAR(50),
     
-    -- === COMPLAINT/WORK ORDER INFO (Repeated on each row) ===
+    -- === COMPLAINT/WORK ORDER INFO (6 columns) ===
     fullbay_complaint_id INTEGER,
     complaint_type VARCHAR(100),
     complaint_subtype VARCHAR(100),
     complaint_note TEXT,
     complaint_cause TEXT,
-    complaint_cause_type VARCHAR(100),
     complaint_authorized BOOLEAN,
-    complaint_severity VARCHAR(50),
-    complaint_mileage_rate VARCHAR(50),
-    complaint_labor_rate VARCHAR(50),
     
-    -- === CORRECTION/SERVICE INFO (Repeated on each row) ===
+    -- === CORRECTION/SERVICE INFO (7 columns) ===
     fullbay_correction_id INTEGER,
     correction_title VARCHAR(255),
-    global_component VARCHAR(255),
-    global_system VARCHAR(255),
+    component VARCHAR(255),
+    system VARCHAR(255),
     global_service VARCHAR(255),
-    unit_service VARCHAR(255),
     recommended_correction TEXT,
-    actual_correction TEXT,
-    correction_performed VARCHAR(50),
-    correction_pre_authorized BOOLEAN,
-    correction_pre_paid BOOLEAN,
+    service_description TEXT,
     
-    -- === LINE ITEM DETAILS (Unique per row) ===
-    line_item_type VARCHAR(20) NOT NULL, -- 'PART', 'LABOR', 'SUPPLY', 'FREIGHT', 'MISC', 'SUBLET'
+    -- === LINE ITEM DETAILS (16 columns) ===
+    line_item_type VARCHAR(20) NOT NULL, -- 'PART', 'LABOR', 'SUPPLY', 'FREIGHT', 'MISC'
     
     -- For Parts
     fullbay_part_id INTEGER,
@@ -90,15 +73,12 @@ CREATE TABLE IF NOT EXISTS fullbay_line_items (
     shop_part_number VARCHAR(100),
     vendor_part_number VARCHAR(100),
     part_category VARCHAR(255),
-    part_manufacturer VARCHAR(255),
     
     -- For Labor/Services  
     labor_description TEXT,
     labor_rate_type VARCHAR(50),
     assigned_technician VARCHAR(255),
     assigned_technician_number VARCHAR(50),
-    assigned_technician_actual_hours DECIMAL(8,4),
-    assigned_technician_portion INTEGER, -- Percentage of work for this technician
     
     -- === QUANTITIES ===
     quantity DECIMAL(10,3),
@@ -106,62 +86,30 @@ CREATE TABLE IF NOT EXISTS fullbay_line_items (
     returned_quantity DECIMAL(10,3),
     
     -- === HOURS (for labor items) ===
-    so_hours DECIMAL(8,4), -- Original individual tech hours from API
-    labor_hours DECIMAL(8,4), -- Proportionally split total labor hours
-    actual_hours DECIMAL(8,4), -- Alias for labor_hours (for compatibility)
+    so_hours DECIMAL(8,2),
+    labor_hours DECIMAL(8,2), -- Proportionally split total labor hours
+    technician_portion INTEGER, -- Percentage of work for this technician
     
     -- === FINANCIAL DETAILS (Per Line Item) ===
     unit_cost DECIMAL(10,2),
     unit_price DECIMAL(10,2),
-    line_total_cost DECIMAL(10,2),
-    line_total_price DECIMAL(10,2),
+    line_total DECIMAL(10,2),
     price_overridden BOOLEAN DEFAULT FALSE,
     
     -- === TAX INFO ===
     taxable BOOLEAN DEFAULT TRUE,
     tax_rate DECIMAL(5,2),
-    tax_amount DECIMAL(10,2),
+    line_tax DECIMAL(10,2),  -- Calculated tax amount for this line
+    sales_total DECIMAL(10,2),  -- Line total + line tax
     
     -- === CLASSIFICATION ===
     inventory_item BOOLEAN DEFAULT FALSE,
     core_type VARCHAR(50),
     sublet BOOLEAN DEFAULT FALSE,
     
-    -- === QUICKBOOKS INTEGRATION ===
-    quickbooks_account VARCHAR(255),
-    quickbooks_item VARCHAR(255),
-    quickbooks_item_type VARCHAR(100),
-    quickbooks_id VARCHAR(50),
-    
-    -- === INVOICE TOTALS (Repeated on each row for context) ===
-    invoice_misc_charge_total DECIMAL(10,2),
-    invoice_service_call_total DECIMAL(10,2),
-    invoice_mileage_total DECIMAL(10,2),
-    invoice_mileage_cost_total DECIMAL(10,2),
-    invoice_parts_total DECIMAL(10,2),
-    invoice_labor_hours_total DECIMAL(8,2),
-    invoice_labor_total DECIMAL(10,2),
-    invoice_sublet_labor_total DECIMAL(10,2),
-    invoice_supplies_total DECIMAL(10,2),
-    invoice_subtotal DECIMAL(10,2),
-    invoice_tax_total DECIMAL(10,2),
-    invoice_total DECIMAL(10,2),
-    invoice_balance DECIMAL(10,2),
-    
-    -- === SERVICE ORDER TOTALS (Repeated on each row for context) ===
-    so_total_parts_cost DECIMAL(10,2),
-    so_total_parts_price DECIMAL(10,2),
-    so_total_labor_hours DECIMAL(8,2),
-    so_total_labor_cost DECIMAL(10,2),
-    so_subtotal DECIMAL(10,2),
-    so_tax_total DECIMAL(10,2),
-    so_total_amount DECIMAL(10,2),
-    
-    -- === METADATA ===
+    -- === METADATA (2 columns) ===
     ingestion_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    ingestion_source VARCHAR(100) DEFAULT 'fullbay_api',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    ingestion_source VARCHAR(100) DEFAULT 'fullbay_api'
 );
 
 -- Indexes for performance
@@ -179,9 +127,9 @@ CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_correction_id ON fullbay_line_
 CREATE INDEX IF NOT EXISTS idx_fullbay_line_items_part_id ON fullbay_line_items(fullbay_part_id);
 
 -- Comments for documentation
-COMMENT ON TABLE fullbay_line_items IS 'Flattened line items from Fullbay invoices for reporting and analysis';
-COMMENT ON COLUMN fullbay_line_items.line_item_type IS 'Type of line item: PART, LABOR, SUPPLY, FREIGHT, MISC, SUBLET';
-COMMENT ON COLUMN fullbay_line_items.assigned_technician_portion IS 'Percentage of work assigned to this technician (0-100)';
+COMMENT ON TABLE fullbay_line_items IS 'Flattened line items from Fullbay invoices for reporting and analysis - ORIGINAL 74-COLUMN SCHEMA';
+COMMENT ON COLUMN fullbay_line_items.line_item_type IS 'Type of line item: PART, LABOR, SUPPLY, FREIGHT, MISC';
+COMMENT ON COLUMN fullbay_line_items.technician_portion IS 'Percentage of work assigned to this technician (0-100)';
 COMMENT ON COLUMN fullbay_line_items.quantity IS 'Quantity of parts/supplies or hours for labor';
 COMMENT ON COLUMN fullbay_line_items.unit_cost IS 'Cost per unit (internal)';
 COMMENT ON COLUMN fullbay_line_items.unit_price IS 'Price per unit (customer-facing)';

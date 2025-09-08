@@ -250,9 +250,6 @@ class DatabaseManager:
             core_type VARCHAR(50),
             sublet BOOLEAN DEFAULT FALSE,
             
-                         -- === SERVICE ORDER TOTALS (1 column) ===
-             so_supplies_total DECIMAL(10,2),  -- Invoice-level supplies total
-            
             -- === METADATA (2 columns) ===
             ingestion_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             ingestion_source VARCHAR(100) DEFAULT 'fullbay_api'
@@ -579,7 +576,7 @@ class DatabaseManager:
             'tax_rate': self._parse_decimal(record.get('taxRate')),
             
             # Service order totals (for context)
-            'so_supplies_total': self._parse_decimal(record.get('suppliesTotal')),  # Invoice-level supplies total
+            'suppliesTotal': self._parse_decimal(record.get('suppliesTotal')),  # Used for SHOP SUPPLIES line item
         }
         
         return context
@@ -934,7 +931,7 @@ class DatabaseManager:
             'unit_cost': None,  # No unit cost for supplies total
             'unit_price': None,  # No unit price for supplies total
             'line_total_cost': None,  # No cost breakdown
-            'line_total': self._parse_decimal(invoice_context.get('so_supplies_total', 0)),
+            'line_total': self._parse_decimal(invoice_context.get('suppliesTotal', 0)),
             'price_overridden': False,
             
                          # Classification
@@ -1194,7 +1191,6 @@ class DatabaseManager:
              so_hours, labor_hours, technician_portion,
                         unit_cost, unit_price, line_total, price_overridden,
                         taxable, tax_rate, line_tax, sales_total, inventory_item, core_type, sublet,
-                          so_supplies_total,
             ingestion_timestamp, ingestion_source
                  )         VALUES (
              %(raw_data_id)s, %(fullbay_invoice_id)s, %(invoice_number)s, %(invoice_date)s, %(due_date)s,
@@ -1216,7 +1212,6 @@ class DatabaseManager:
              %(so_hours)s, %(labor_hours)s, %(technician_portion)s,
                         %(unit_cost)s, %(unit_price)s, %(line_total)s, %(price_overridden)s,
                         %(taxable)s, %(tax_rate)s, %(line_tax)s, %(sales_total)s, %(inventory_item)s, %(core_type)s, %(sublet)s,
-                          %(so_supplies_total)s,
             CURRENT_TIMESTAMP, 'fullbay_api'
         )
         """
@@ -1324,7 +1319,6 @@ class DatabaseManager:
             'inventory_item': False,
                          'core_type': None,
              'sublet': False,
-                          'so_supplies_total': None,  # Invoice-level supplies total
         }
         
         # Start with defaults and update with actual values
