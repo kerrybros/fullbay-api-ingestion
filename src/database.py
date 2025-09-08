@@ -52,10 +52,13 @@ class DatabaseManager:
     
     def connect(self):
         """
-        Establish database connection and create tables if they don't exist.
+        Establish database connection and verify required tables exist.
+        
+        Note: Tables must be created manually using SQL scripts before first use.
+        This method will verify tables exist but will NOT create them automatically.
         
         Raises:
-            Exception: If connection fails
+            Exception: If connection fails or required tables don't exist
         """
         try:
             logger.info("Connecting to database...")
@@ -71,15 +74,26 @@ class DatabaseManager:
                 cursor_factory=psycopg2.extras.RealDictCursor
             )
             
-            # Test connection and create tables
+            # Test connection (tables must already exist)
             with self._get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("SELECT version();")
                     version = cursor.fetchone()['version']
                     logger.info(f"Connected to PostgreSQL: {version}")
                     
-                    # Create tables
-                    self._create_tables(cursor)
+                    # Verify required tables exist
+                    cursor.execute("""
+                        SELECT table_name FROM information_schema.tables 
+                        WHERE table_schema = 'public' AND table_name IN ('fullbay_raw_data', 'fullbay_line_items', 'ingestion_metadata')
+                    """)
+                    existing_tables = [row['table_name'] for row in cursor.fetchall()]
+                    required_tables = ['fullbay_raw_data', 'fullbay_line_items', 'ingestion_metadata']
+                    missing_tables = [t for t in required_tables if t not in existing_tables]
+                    
+                    if missing_tables:
+                        raise Exception(f"Required database tables do not exist: {missing_tables}. Please run the SQL setup scripts first.")
+                    
+                    logger.info(f"Verified required tables exist: {existing_tables}")
                     conn.commit()
             
             logger.info("Database connection established and tables ready")
@@ -112,6 +126,10 @@ class DatabaseManager:
         """
         Create database tables if they don't exist.
         
+        WARNING: This method is NO LONGER called automatically during connect().
+        Tables must be created manually using SQL scripts to prevent accidental schema changes.
+        This method is kept for reference/emergency use only.
+        
         Args:
             cursor: Database cursor
         """
@@ -127,7 +145,7 @@ class DatabaseManager:
         );
         """
         
-                 # Flattened line items table - UPDATED 73-COLUMN SCHEMA
+                 # Flattened line items table - UPDATED 74-COLUMN SCHEMA
         create_line_items_table = f"""
         CREATE TABLE IF NOT EXISTS {self.line_items_table} (
             id SERIAL PRIMARY KEY,
@@ -152,7 +170,7 @@ class DatabaseManager:
             
             -- === SERVICE ORDER INFO (5 columns) ===
             fullbay_service_order_id VARCHAR(50),
-            repair_order_number VARCHAR(50),
+            so_number VARCHAR(50),
             service_order_created TIMESTAMP WITH TIME ZONE,
             service_order_start_date TIMESTAMP WITH TIME ZONE,
             service_order_completion_date TIMESTAMP WITH TIME ZONE,
@@ -188,7 +206,7 @@ class DatabaseManager:
              recommended_correction TEXT,
              service_description TEXT,
             
-            -- === LINE ITEM DETAILS (15 columns) ===
+            -- === LINE ITEM DETAILS (16 columns) ===
             line_item_type VARCHAR(20) NOT NULL, -- 'PART', 'LABOR', 'SUPPLY', 'FREIGHT', 'MISC'
             
             -- For Parts
@@ -211,6 +229,7 @@ class DatabaseManager:
             
                          -- === HOURS (for labor items) ===
              so_hours DECIMAL(8,2),
+             labor_hours DECIMAL(8,2), -- Proportionally split total labor hours
              technician_portion INTEGER, -- Percentage of work for this technician
             
                                                  -- === FINANCIAL DETAILS (Per Line Item) ===
@@ -784,29 +803,21 @@ class DatabaseManager:
                     'assigned_technician_number': None,
                     'technician_portion': None,
                     'so_hours': self._parse_decimal(correction.get('laborHoursTotal')),
-                    'labor_hours': self._parse_decimal(correction.get('laborHoursTotal')),
-                    'actual_hours': self._parse_decimal(correction.get('laborHoursTotal')),
                     'line_total': self._parse_decimal(correction.get('laborTotal')),
                     'taxable': correction.get('taxable') != 'No',
                 })
                 line_items.append(line_item)
         else:
-            # Get total labor hours and cost from correction
+            # Get total labor hours from correction
             total_labor_hours = self._parse_decimal(correction.get('laborHoursTotal', 0))
             total_labor_cost = self._parse_decimal(correction.get('laborTotal', 0))
-            
-            # Validate that portions add to 100%
-            total_portion = sum(tech.get('portion', 0) for tech in valid_technicians)
-            if abs(total_portion - 100) > 0.001:
-                logger.warning(f"Portions don't add to 100% for correction {context.get('fullbay_correction_id')}: "
-                             f"Total portion = {total_portion}%")
             
             # Create separate labor row for each technician
             for tech in valid_technicians:
                 portion = tech.get('portion', 0)
                 if portion <= 0:
                     continue
-                
+                    
                 # Calculate this technician's portion of total labor hours (same logic as parts)
                 tech_labor_hours = total_labor_hours * (portion / 100)
                 tech_labor_cost = total_labor_cost * (portion / 100)
@@ -821,69 +832,13 @@ class DatabaseManager:
                     'technician_portion': portion,
                     'so_hours': self._parse_decimal(tech.get('actualHours')),  # Original API data
                     'labor_hours': tech_labor_hours,  # Proportionally split hours
-                    'actual_hours': tech_labor_hours,  # Alias for compatibility
                     'line_total': tech_labor_cost,
                     'taxable': correction.get('taxable') != 'No',
                 })
                 line_items.append(line_item)
         
-        # Validate labor totals (hours and cost)
-        self._validate_labor_totals(correction, line_items)
-        
         logger.debug(f"Created {len(line_items)} labor line items for correction {context.get('fullbay_correction_id')}")
         return line_items
-    
-    def _validate_labor_totals(self, correction: Dict[str, Any], labor_line_items: List[Dict[str, Any]]) -> None:
-        """
-        Validate that the sum of all labor line item totals matches the original correction totals.
-        
-        Args:
-            correction: Correction JSON object
-            labor_line_items: List of labor line items
-            
-        Raises:
-            ValueError: If totals don't match within tolerance
-        """
-        if not labor_line_items:
-            return
-            
-        # Get original totals from the correction
-        original_labor_hours = self._parse_decimal(correction.get('laborHoursTotal', 0))
-        original_labor_cost = self._parse_decimal(correction.get('laborTotal', 0))
-        
-        # Calculate sum of all labor line item totals
-        calculated_labor_hours = 0
-        calculated_labor_cost = 0
-        for item in labor_line_items:
-            calculated_labor_hours += self._parse_decimal(item.get('labor_hours', 0))
-            calculated_labor_cost += self._parse_decimal(item.get('line_total', 0))
-        
-        # Check if totals match within tolerance (0.001)
-        hours_diff = abs(original_labor_hours - calculated_labor_hours)
-        cost_diff = abs(original_labor_cost - calculated_labor_cost)
-        
-        if hours_diff > 0.001:
-            # Make small adjustment to largest line item to match exactly
-            if labor_line_items:
-                largest_item = max(labor_line_items, key=lambda x: self._parse_decimal(x.get('labor_hours', 0)))
-                adjustment = original_labor_hours - calculated_labor_hours
-                current_hours = self._parse_decimal(largest_item.get('labor_hours', 0))
-                largest_item['labor_hours'] = current_hours + adjustment
-                largest_item['actual_hours'] = current_hours + adjustment  # Update alias too
-                logger.info(f"Adjusted labor hours for correction {correction.get('primaryKey')}: "
-                          f"Original: {original_labor_hours}, Calculated: {calculated_labor_hours}, "
-                          f"Adjustment: {adjustment}, New largest item hours: {current_hours + adjustment}")
-        
-        if cost_diff > 0.001:
-            # Make small adjustment to largest line item to match exactly
-            if labor_line_items:
-                largest_item = max(labor_line_items, key=lambda x: self._parse_decimal(x.get('line_total', 0)))
-                adjustment = original_labor_cost - calculated_labor_cost
-                current_total = self._parse_decimal(largest_item.get('line_total', 0))
-                largest_item['line_total'] = current_total + adjustment
-                logger.info(f"Adjusted labor cost for correction {correction.get('primaryKey')}: "
-                          f"Original: {original_labor_cost}, Calculated: {calculated_labor_cost}, "
-                          f"Adjustment: {adjustment}, New largest item total: {current_total + adjustment}")
     
     def _validate_service_description_total(self, correction: Dict[str, Any], parts_line_items: List[Dict[str, Any]], labor_line_items: List[Dict[str, Any]]) -> None:
         """
@@ -1046,6 +1001,7 @@ class DatabaseManager:
             'to_be_returned_quantity': 0,
             'returned_quantity': 0,
             'so_hours': None,
+            'labor_hours': None,
             'technician_portion': None,
             
             # Financial details from misc charge amount
@@ -1234,8 +1190,8 @@ class DatabaseManager:
             line_item_type, fullbay_part_id, part_description, shop_part_number, 
             vendor_part_number, part_category,
             labor_description, labor_rate_type, assigned_technician, assigned_technician_number,
-                                                 quantity, to_be_returned_quantity, returned_quantity,
-                        so_hours, technician_portion,
+             quantity, to_be_returned_quantity, returned_quantity,
+             so_hours, labor_hours, technician_portion,
                         unit_cost, unit_price, line_total, price_overridden,
                         taxable, tax_rate, line_tax, sales_total, inventory_item, core_type, sublet,
                           so_supplies_total,
@@ -1256,8 +1212,8 @@ class DatabaseManager:
             %(line_item_type)s, %(fullbay_part_id)s, %(part_description)s, %(shop_part_number)s,
             %(vendor_part_number)s, %(part_category)s,
             %(labor_description)s, %(labor_rate_type)s, %(assigned_technician)s, %(assigned_technician_number)s,
-                                                 %(quantity)s, %(to_be_returned_quantity)s, %(returned_quantity)s,
-                        %(so_hours)s, %(technician_portion)s,
+             %(quantity)s, %(to_be_returned_quantity)s, %(returned_quantity)s,
+             %(so_hours)s, %(labor_hours)s, %(technician_portion)s,
                         %(unit_cost)s, %(unit_price)s, %(line_total)s, %(price_overridden)s,
                         %(taxable)s, %(tax_rate)s, %(line_tax)s, %(sales_total)s, %(inventory_item)s, %(core_type)s, %(sublet)s,
                           %(so_supplies_total)s,
