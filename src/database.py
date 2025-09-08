@@ -1306,6 +1306,7 @@ class DatabaseManager:
              'to_be_returned_quantity': None,
              'returned_quantity': None,
                           'so_hours': None,
+             'labor_hours': None,
              'technician_portion': None,
                                      'unit_cost': None,
                         'unit_price': None,

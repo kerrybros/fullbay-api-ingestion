@@ -18,13 +18,24 @@ class Config:
     and AWS Secrets Manager.
     """
     
-    def __init__(self):
+    def __init__(self, shop_id: str = None):
         self.environment = os.getenv("ENVIRONMENT", "development")
         self.aws_region = os.getenv("AWS_REGION", "us-east-1")
+        
+        # Shop Configuration
+        self.shop_id = shop_id
+        self.shop_name = None
         
         # API Configuration
         self.fullbay_api_base_url = os.getenv("FULLBAY_API_BASE_URL", "https://api.fullbay.com")
         self.fullbay_api_version = os.getenv("FULLBAY_API_VERSION", "v1")
+        
+        # Load shop-specific API key if shop_id provided
+        if shop_id:
+            self.shop_name = os.getenv(f"FULLBAY_SHOP_NAME_{shop_id}", f"Shop {shop_id}")
+            self._shop_api_key = os.getenv(f"FULLBAY_API_KEY_{shop_id}")
+        else:
+            self._shop_api_key = None
         
         # Database Configuration
         self.db_host = os.getenv("DB_HOST")
@@ -85,6 +96,11 @@ class Config:
     @property
     def fullbay_api_key(self) -> Optional[str]:
         """Get Fullbay API key from secrets or environment."""
+        # If shop-specific key is available, use it
+        if self._shop_api_key:
+            return self._shop_api_key
+        
+        # Fall back to secrets manager or generic environment variable
         return self._secrets.get("fullbay_api_key") or os.getenv("FULLBAY_API_KEY")
     
     @property
@@ -120,8 +136,10 @@ class Config:
     
     def __str__(self) -> str:
         """String representation (excluding sensitive data)."""
+        shop_info = f"shop={self.shop_name}({self.shop_id}), " if self.shop_id else ""
         return (
-            f"Config(environment={self.environment}, "
+            f"Config({shop_info}"
+            f"environment={self.environment}, "
             f"db_host={self.db_host}, "
             f"db_name={self.db_name}, "
             f"api_base_url={self.fullbay_api_base_url})"

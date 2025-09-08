@@ -1,0 +1,5 @@
+[33m37cfbad[m[33m ([m[1;36mHEAD -> [m[1;32mmaster[m[33m)[m OPTIMIZE: Remove redundant so_supplies_total column
+[33medb5ea5[m SECURITY: Remove automatic schema creation from DatabaseManager
+[33m47e07e1[m[33m ([m[1;31morigin/master[m[33m)[m Fix schema and code alignment for fullbay_line_items table
+[33ma685de7[m Initial commit: FullBay API ingestion project with Lambda functions, database setup, and deployment scripts
+[33mf6a3683[m Initial commit: FullBay API ingestion system with working mapping functionality
